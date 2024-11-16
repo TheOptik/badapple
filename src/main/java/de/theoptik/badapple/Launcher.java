@@ -6,8 +6,12 @@ import java.io.*;
 import java.net.Socket;
 import java.nio.ByteBuffer;
 import java.util.Arrays;
+import java.util.stream.IntStream;
 
 public class Launcher {
+
+    private static final String[] hexTable = IntStream.iterate(0, i -> i+1).mapToObj(i -> String.format("%02X",i)).limit(256).toArray(String[]::new);
+
     public static void main(String[] args) {
         try (var socket = new Socket("localhost", 1337); var writer = new PrintWriter(socket.getOutputStream(), false); var frameGrabber = new FFmpegFrameGrabber("Touhou_Bad_Apple.mp4")) {
             frameGrabber.start();
@@ -24,7 +28,7 @@ public class Launcher {
                     var yOffset = y*width + y*offsetPerLine;
                     for (int x = 0; x < width; x++) {
                         var index = (x + yOffset) * 3;
-                        writer.println("PX " + x  + " " + y + " " + String.format("%06X", (buffer.get(index) << 16) + (buffer.get(index + 1) << 8) + buffer.get(index + 2)));
+                        writer.println("PX " + x  + " " + y + " " + formatPixelValue(buffer.get(index),  buffer.get(index + 1),  buffer.get(index + 2)));
                     }
                 }
                 writer.flush();
@@ -37,6 +41,12 @@ public class Launcher {
         } catch (Exception e) {
             e.printStackTrace();
         }
+    }
+
+    private static String formatPixelValue(byte r, byte g, byte b) {
+
+        return hexTable[r& 0xFF] + hexTable[g& 0xFF] + hexTable[b& 0xFF];
+
     }
 
     private static void printFps(long[] timesPerFrame) {
