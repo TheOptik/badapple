@@ -14,13 +14,16 @@ public class Launcher {
             var image = frameGrabber.grabImage();
             var timesPerFrame = new long[8];
             var frameCounter = 0;
+            var width = image.imageWidth;
+            var height = image.imageHeight;
+            var offsetPerLine = (image.imageStride/3) - width;
             while (image != null) {
                 var startTime = System.currentTimeMillis();
                 var buffer = (ByteBuffer) image.image[0];
-                var offsetPerLine = (image.imageStride/3) - image.imageWidth;
-                for (int y = 0; y < image.imageHeight ; y++) {
-                    for (int x = 0; x < image.imageWidth; x++) {
-                        var index = (x + y*image.imageWidth + y*offsetPerLine) * 3;
+                for (int y = 0; y < height ; y++) {
+                    var yOffset = y*width + y*offsetPerLine;
+                    for (int x = 0; x < width; x++) {
+                        var index = (x + yOffset) * 3;
                         writer.println("PX " + x  + " " + y + " " + String.format("%06X", (buffer.get(index) << 16) + (buffer.get(index + 1) << 8) + buffer.get(index + 2)));
                         if (reader.ready()) {
                             System.out.println(reader.readLine());
