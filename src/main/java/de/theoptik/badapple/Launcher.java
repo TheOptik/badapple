@@ -9,7 +9,7 @@ import java.util.Arrays;
 
 public class Launcher {
     public static void main(String[] args) {
-        try (var socket = new Socket("localhost", 1337); var writer = new PrintWriter((socket.getOutputStream()), false); var reader = new BufferedReader(new InputStreamReader(socket.getInputStream())); var frameGrabber = new FFmpegFrameGrabber("Touhou_Bad_Apple.mp4")) {
+        try (var socket = new Socket("localhost", 1337); var writer = new PrintWriter(socket.getOutputStream(), false); var frameGrabber = new FFmpegFrameGrabber("Touhou_Bad_Apple.mp4")) {
             frameGrabber.start();
             var image = frameGrabber.grabImage();
             var timesPerFrame = new long[8];
@@ -25,9 +25,6 @@ public class Launcher {
                     for (int x = 0; x < width; x++) {
                         var index = (x + yOffset) * 3;
                         writer.println("PX " + x  + " " + y + " " + String.format("%06X", (buffer.get(index) << 16) + (buffer.get(index + 1) << 8) + buffer.get(index + 2)));
-                        if (reader.ready()) {
-                            System.out.println(reader.readLine());
-                        }
                     }
                 }
                 writer.flush();
