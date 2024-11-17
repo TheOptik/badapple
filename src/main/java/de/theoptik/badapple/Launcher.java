@@ -3,8 +3,9 @@ package de.theoptik.badapple;
 import org.bytedeco.javacv.FFmpegFrameGrabber;
 
 import java.io.*;
-import java.net.Socket;
+import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
+import java.nio.channels.SocketChannel;
 import java.util.Arrays;
 import java.util.stream.IntStream;
 
@@ -21,50 +22,59 @@ public class Launcher {
 
     public static void main(String[] args) throws Exception {
 
-        try (var socket = new Socket("localhost", 1337); var outputStream = new BufferedOutputStream(socket.getOutputStream())) {
-
+        try (var socket = SocketChannel.open()) {
+            socket.configureBlocking(true);
+            socket.connect(new InetSocketAddress("localhost", 1337));
             while (true) {
-                try (var frameGrabber = new FFmpegFrameGrabber("Touhou_Bad_Apple.mp4")) {
-                    frameGrabber.start();
-                    var image = frameGrabber.grabImage();
-                    var timesPerFrame = new long[100];
-                    var frameCounter = 0;
-                    var width = image.imageWidth;
-                    var height = image.imageHeight;
-                    var offsetPerLine = (image.imageStride / 3) - width;
-                    var previousFrame = new byte[width * height * 3];
-                    while (image != null) {
-                        var startTime = System.currentTimeMillis();
-                        var buffer = (ByteBuffer) image.image[0];
-                        if (frameCounter == 0) {
-                            sendChangedPixels(height, width, offsetPerLine, outputStream, buffer, (x, y, r, g, b) -> true);
-                        } else {
-                            sendChangedPixels(height, width, offsetPerLine, outputStream, buffer, (x, y, r, g, b) -> {
-                                var index = (x + y * width) * 3;
-                                var result = previousFrame[index] != r || previousFrame[index + 1] != g || previousFrame[index + 2] != b;
-
-                                previousFrame[index] = r;
-                                previousFrame[index + 1] = g;
-                                previousFrame[index + 2] = b;
-
-                                return result;
-                            });
-                        }
-                        outputStream.flush();
-                        //the assignment is technically not necessary, because the FrameGrabber will overwrite the same memory address, but this way we get null as a result when the stream is over
-                        image = frameGrabber.grabImage();
-                        timesPerFrame[frameCounter % timesPerFrame.length] = System.currentTimeMillis() - startTime;
-                        if(frameCounter % timesPerFrame.length == 0){
-                            printFps(timesPerFrame);
-                        }
-                        frameCounter++;
-                    }
-                }
+                streamMp4(socket, "Touhou_Bad_Apple.mp4");
             }
         }
     }
 
-    private static void sendChangedPixels(int height, int width, int offsetPerLine, OutputStream outputStream, ByteBuffer buffer, HasValueChanged changeDetector) throws IOException {
+    public static void streamMp4(SocketChannel socket, String filePath) throws IOException {
+        try (var frameGrabber = new FFmpegFrameGrabber(filePath)) {
+            frameGrabber.start();
+            var image = frameGrabber.grabImage();
+            var timesPerFrame = new long[100];
+            var frameCounter = 0;
+            var width = image.imageWidth;
+            var height = image.imageHeight;
+            var offsetPerLine = (image.imageStride / 3) - width;
+            var previousFrame = new byte[width * height * 3];
+            var writeBuffer = ByteBuffer.allocate(width * height * message.length);
+            while (image != null) {
+                var startTime = System.currentTimeMillis();
+                var buffer = (ByteBuffer) image.image[0];
+                if (frameCounter == 0) {
+                    sendChangedPixels(height, width, offsetPerLine, writeBuffer, buffer, (x, y, r, g, b) -> true);
+                } else {
+                    sendChangedPixels(height, width, offsetPerLine, writeBuffer, buffer, (x, y, r, g, b) -> {
+                        var index = (x + y * width) * 3;
+                        var result = previousFrame[index] != r || previousFrame[index + 1] != g || previousFrame[index + 2] != b;
+
+                        previousFrame[index] = r;
+                        previousFrame[index + 1] = g;
+                        previousFrame[index + 2] = b;
+
+                        return result;
+                    });
+                }
+                writeBuffer.flip();
+                socket.write(writeBuffer);
+                writeBuffer.clear();
+                socket.socket().getOutputStream().flush();
+                //the assignment is technically not necessary, because the FrameGrabber will overwrite the same memory address, but this way we get null as a result when the stream is over
+                image = frameGrabber.grabImage();
+                timesPerFrame[frameCounter % timesPerFrame.length] = System.currentTimeMillis() - startTime;
+                if(frameCounter % timesPerFrame.length == 0){
+                    printFps(timesPerFrame);
+                }
+                frameCounter++;
+            }
+        }
+    }
+
+    private static void sendChangedPixels(int height, int width, int offsetPerLine, ByteBuffer writeBuffer, ByteBuffer buffer, HasValueChanged changeDetector) throws IOException {
         for (int y = 0; y < height; y++) {
             var yOffset = y * width + y * offsetPerLine;
 
@@ -96,7 +106,7 @@ public class Launcher {
                 message[colorOffset+5] = bBytes[1];
 
                 if (changeDetector.hasChanged(x, y, r, g, b)) {
-                    outputStream.write(message);
+                    writeBuffer.put(message);
                 }
             }
         }
