@@ -36,5 +36,6 @@
     | --------------- | ---- | --- | ------ | ------- | ----- |
     | Benchmarks.init | avgt |  25 | 16,305 | ± 0,112 |  s/op |
   - and write times are looking much better
-  - - ![](./visualvm_4.jpg)
+  - ![](./visualvm_4.jpg)
+  - changing to non-blocking nio, doesn't make a big difference. let's try double buffering!
     

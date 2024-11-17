@@ -5,8 +5,12 @@ import org.bytedeco.javacv.FFmpegFrameGrabber;
 import java.io.*;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
+import java.nio.channels.SelectionKey;
+import java.nio.channels.Selector;
 import java.nio.channels.SocketChannel;
 import java.util.Arrays;
+import java.util.Iterator;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.stream.IntStream;
 
 public class Launcher {
@@ -22,11 +26,23 @@ public class Launcher {
 
     public static void main(String[] args) throws Exception {
 
-        try (var socket = SocketChannel.open()) {
-            socket.configureBlocking(true);
+        try (var socket = SocketChannel.open(); var selector = Selector.open()) {
+            socket.configureBlocking(false);
+
+            socket.register(selector, SelectionKey.OP_CONNECT);
             socket.connect(new InetSocketAddress("localhost", 1337));
             while (true) {
-                streamMp4(socket, "Touhou_Bad_Apple.mp4");
+                selector.select();
+                for(var key : selector.keys()){
+                    if (key.isConnectable()) {
+                        socket.finishConnect();
+                        socket.register(socket.keyFor(selector).selector(), SelectionKey.OP_WRITE);
+                        selector.selectedKeys().clear();
+
+                    } else if (selector.keys().stream().anyMatch(SelectionKey::isWritable)) {
+                        streamMp4(socket, "Touhou_Bad_Apple.mp4");
+                    }
+                }
             }
         }
     }
@@ -60,13 +76,15 @@ public class Launcher {
                     });
                 }
                 writeBuffer.flip();
-                socket.write(writeBuffer);
+                while(writeBuffer.remaining() > 0){
+                    socket.write(writeBuffer);
+                }
                 writeBuffer.clear();
                 socket.socket().getOutputStream().flush();
                 //the assignment is technically not necessary, because the FrameGrabber will overwrite the same memory address, but this way we get null as a result when the stream is over
                 image = frameGrabber.grabImage();
                 timesPerFrame[frameCounter % timesPerFrame.length] = System.currentTimeMillis() - startTime;
-                if(frameCounter % timesPerFrame.length == 0){
+                if (frameCounter % timesPerFrame.length == 0) {
                     printFps(timesPerFrame);
                 }
                 frameCounter++;
@@ -99,11 +117,11 @@ public class Launcher {
                 byte[] bBytes = formatColorValue(b);
 
                 message[colorOffset] = rBytes[0];
-                message[colorOffset+1] = rBytes[1];
-                message[colorOffset+2] = gBytes[0];
-                message[colorOffset+3] = gBytes[1];
-                message[colorOffset+4] = bBytes[0];
-                message[colorOffset+5] = bBytes[1];
+                message[colorOffset + 1] = rBytes[1];
+                message[colorOffset + 2] = gBytes[0];
+                message[colorOffset + 3] = gBytes[1];
+                message[colorOffset + 4] = bBytes[0];
+                message[colorOffset + 5] = bBytes[1];
 
                 if (changeDetector.hasChanged(x, y, r, g, b)) {
                     writeBuffer.put(message);
