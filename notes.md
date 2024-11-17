@@ -11,3 +11,4 @@
     - oh... the string format thing is kind of slow....
     - using a lookup table lets us get somewhat stable 30 fps!
   - but.... that can't be it, right? how far can we go?
+  - ~120fps by only sending diffs!
