@@ -2,15 +2,14 @@ package de.theoptik.badapple;
 
 import org.bytedeco.javacv.FFmpegFrameGrabber;
 
-import java.io.*;
+import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
 import java.nio.channels.SelectionKey;
 import java.nio.channels.Selector;
 import java.nio.channels.SocketChannel;
 import java.util.Arrays;
-import java.util.Iterator;
-import java.util.concurrent.locks.ReentrantReadWriteLock;
+import java.util.concurrent.Semaphore;
 import java.util.stream.IntStream;
 
 public class Launcher {
@@ -33,7 +32,7 @@ public class Launcher {
             socket.connect(new InetSocketAddress("localhost", 1337));
             while (true) {
                 selector.select();
-                for(var key : selector.keys()){
+                for (var key : selector.keys()) {
                     if (key.isConnectable()) {
                         socket.finishConnect();
                         socket.register(socket.keyFor(selector).selector(), SelectionKey.OP_WRITE);
@@ -47,48 +46,70 @@ public class Launcher {
         }
     }
 
-    public static void streamMp4(SocketChannel socket, String filePath) throws IOException {
+    public static void streamMp4(SocketChannel socket, String filePath) throws Exception {
         try (var frameGrabber = new FFmpegFrameGrabber(filePath)) {
             frameGrabber.start();
-            var image = frameGrabber.grabImage();
-            var timesPerFrame = new long[100];
-            var frameCounter = 0;
-            var width = image.imageWidth;
-            var height = image.imageHeight;
-            var offsetPerLine = (image.imageStride / 3) - width;
+            var width = frameGrabber.getImageWidth();
+            var height = frameGrabber.getImageHeight();
             var previousFrame = new byte[width * height * 3];
-            var writeBuffer = ByteBuffer.allocate(width * height * message.length);
-            while (image != null) {
-                var startTime = System.currentTimeMillis();
-                var buffer = (ByteBuffer) image.image[0];
-                if (frameCounter == 0) {
-                    sendChangedPixels(height, width, offsetPerLine, writeBuffer, buffer, (x, y, r, g, b) -> true);
-                } else {
-                    sendChangedPixels(height, width, offsetPerLine, writeBuffer, buffer, (x, y, r, g, b) -> {
-                        var index = (x + y * width) * 3;
-                        var result = previousFrame[index] != r || previousFrame[index + 1] != g || previousFrame[index + 2] != b;
+            var writeBuffers = new ByteBuffer[]{ByteBuffer.allocate(width * height * message.length), ByteBuffer.allocate(width * height * message.length)};
+            var bufferLocks = new Semaphore[]{new Semaphore(1), new Semaphore(1)};
+            var bufferFiller = new Thread(() -> {
+                try {
+                    var frameCounter = 0;
+                    var image = frameGrabber.grabImage();
+                    var offsetPerLine = (image.imageStride / 3) - width;
 
-                        previousFrame[index] = r;
-                        previousFrame[index + 1] = g;
-                        previousFrame[index + 2] = b;
+                    while (image != null) {
+                        var frameBufferIndex = frameCounter % writeBuffers.length;
+                        bufferLocks[frameBufferIndex].acquire();
+                        var buffer = (ByteBuffer) image.image[0];
+                        if (frameCounter == 0) {
+                            sendChangedPixels(height, width, offsetPerLine, writeBuffers[frameBufferIndex], buffer, (x, y, r, g, b) -> true);
+                        } else {
+                            sendChangedPixels(height, width, offsetPerLine, writeBuffers[frameBufferIndex], buffer, (x, y, r, g, b) -> {
+                                var index = (x + y * width) * 3;
+                                var result = previousFrame[index] != r || previousFrame[index + 1] != g || previousFrame[index + 2] != b;
 
-                        return result;
-                    });
+                                previousFrame[index] = r;
+                                previousFrame[index + 1] = g;
+                                previousFrame[index + 2] = b;
+
+                                return result;
+                            });
+                        }
+                        bufferLocks[frameBufferIndex].release();
+                        //the assignment is technically not necessary, because the FrameGrabber will overwrite the same memory address, but this way we get null as a result when the stream is over
+                        image = frameGrabber.grabImage();
+                        frameCounter++;
+                    }
+                } catch (Exception e) {
+                    e.printStackTrace();
                 }
-                writeBuffer.flip();
-                while(writeBuffer.remaining() > 0){
-                    socket.write(writeBuffer);
+            });
+            bufferFiller.start();
+            var writerThread = new Thread(() -> {
+                try {
+                    var frameCounter = 0;
+                    while (bufferFiller.isAlive()) {
+                        var frameBufferIndex = frameCounter % writeBuffers.length;
+                        bufferLocks[frameBufferIndex].acquire();
+                        writeBuffers[frameBufferIndex].flip();
+                        while (writeBuffers[frameBufferIndex].remaining() > 0) {
+                            socket.write(writeBuffers[frameBufferIndex]);
+                        }
+                        writeBuffers[frameBufferIndex].clear();
+                        bufferLocks[frameBufferIndex].release();
+                        socket.socket().getOutputStream().flush();
+                        frameCounter++;
+                    }
+                } catch (Exception e) {
+                    e.printStackTrace();
                 }
-                writeBuffer.clear();
-                socket.socket().getOutputStream().flush();
-                //the assignment is technically not necessary, because the FrameGrabber will overwrite the same memory address, but this way we get null as a result when the stream is over
-                image = frameGrabber.grabImage();
-                timesPerFrame[frameCounter % timesPerFrame.length] = System.currentTimeMillis() - startTime;
-                if (frameCounter % timesPerFrame.length == 0) {
-                    printFps(timesPerFrame);
-                }
-                frameCounter++;
-            }
+            });
+            writerThread.start();
+            bufferFiller.join();
+            writerThread.join();
         }
     }
 
