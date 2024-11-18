@@ -8,9 +8,12 @@ import java.nio.ByteBuffer;
 import java.nio.channels.SelectionKey;
 import java.nio.channels.Selector;
 import java.nio.channels.SocketChannel;
+import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.concurrent.Semaphore;
+import java.util.List;
+import java.util.concurrent.*;
 import java.util.stream.IntStream;
+import java.util.stream.Stream;
 
 public class Launcher {
 
@@ -47,10 +50,13 @@ public class Launcher {
     }
 
     public static void streamMp4(SocketChannel socket, String filePath) throws Exception {
-        try (var frameGrabber = new FFmpegFrameGrabber(filePath)) {
+        var processors = Runtime.getRuntime().availableProcessors();
+
+        try (var frameGrabber = new FFmpegFrameGrabber(filePath); var executor = Executors.newFixedThreadPool(processors);) {
             frameGrabber.start();
             var width = frameGrabber.getImageWidth();
             var height = frameGrabber.getImageHeight();
+            var batchSize = height / processors;
             var previousFrame = new byte[width * height * 3];
             var writeBuffers = new ByteBuffer[]{ByteBuffer.allocate(width * height * message.length), ByteBuffer.allocate(width * height * message.length)};
             var bufferLocks = new Semaphore[]{new Semaphore(1), new Semaphore(1)};
@@ -62,12 +68,13 @@ public class Launcher {
 
                     while (image != null) {
                         var frameBufferIndex = frameCounter % writeBuffers.length;
-                        bufferLocks[frameBufferIndex].acquire();
                         var buffer = (ByteBuffer) image.image[0];
+                        bufferLocks[frameBufferIndex].acquire();
+                        List<Callable<Void>> tasks;
                         if (frameCounter == 0) {
-                            sendChangedPixels(height, width, offsetPerLine, writeBuffers[frameBufferIndex], buffer, (x, y, r, g, b) -> true);
+                            tasks = writeChangedPixelsToBuffer(height, width, offsetPerLine, writeBuffers[frameBufferIndex], buffer, (x, y, r, g, b) -> true, batchSize);
                         } else {
-                            sendChangedPixels(height, width, offsetPerLine, writeBuffers[frameBufferIndex], buffer, (x, y, r, g, b) -> {
+                            tasks = writeChangedPixelsToBuffer(height, width, offsetPerLine, writeBuffers[frameBufferIndex], buffer, (x, y, r, g, b) -> {
                                 var index = (x + y * width) * 3;
                                 var result = previousFrame[index] != r || previousFrame[index + 1] != g || previousFrame[index + 2] != b;
 
@@ -76,7 +83,10 @@ public class Launcher {
                                 previousFrame[index + 2] = b;
 
                                 return result;
-                            });
+                            }, batchSize);
+                        }
+                        for(var future: executor.invokeAll(tasks)){
+                            future.get();
                         }
                         bufferLocks[frameBufferIndex].release();
                         //the assignment is technically not necessary, because the FrameGrabber will overwrite the same memory address, but this way we get null as a result when the stream is over
@@ -88,6 +98,7 @@ public class Launcher {
                 }
             });
             bufferFiller.start();
+
             var writerThread = new Thread(() -> {
                 try {
                     var frameCounter = 0;
@@ -108,47 +119,68 @@ public class Launcher {
                 }
             });
             writerThread.start();
+
             bufferFiller.join();
             writerThread.join();
         }
     }
 
-    private static void sendChangedPixels(int height, int width, int offsetPerLine, ByteBuffer writeBuffer, ByteBuffer buffer, HasValueChanged changeDetector) throws IOException {
-        for (int y = 0; y < height; y++) {
-            var yOffset = y * width + y * offsetPerLine;
+    private static List<Callable<Void>> writeChangedPixelsToBuffer(
+            int height,
+            int width,
+            int offsetPerLine,
+            ByteBuffer writeBuffer,
+            ByteBuffer image,
+            HasValueChanged changeDetector,
+            int batchSize
+    ) {
+        return IntStream.range(0,height/batchSize).<Callable<Void>>mapToObj(yChunk ->{
+                    var startY = yChunk * batchSize;
+            var endY = Math.min(startY + batchSize, height);
 
-            var yBytes = formatCoordinateValue(y);
-            message[yCoordinateOffset] = yBytes[0];
-            message[yCoordinateOffset + 1] = yBytes[1];
-            message[yCoordinateOffset + 2] = yBytes[2];
+        return () -> {
+                byte[] messageCopy = new byte[message.length];
 
-            for (int x = 0; x < width; x++) {
+                for (int y = startY; y < endY; y++) {
+                    System.arraycopy(message, 0, messageCopy, 0, message.length);
 
-                var xBytes = formatCoordinateValue(x);
-                message[xCoordinateOffset] = xBytes[0];
-                message[xCoordinateOffset + 1] = xBytes[1];
-                message[xCoordinateOffset + 2] = xBytes[2];
+                    var yOffset = y * width + y * offsetPerLine;
+                    var yBytes = formatCoordinateValue(y);
+                    messageCopy[yCoordinateOffset] = yBytes[0];
+                    messageCopy[yCoordinateOffset + 1] = yBytes[1];
+                    messageCopy[yCoordinateOffset + 2] = yBytes[2];
 
-                var index = (x + yOffset) * 3;
-                byte r = buffer.get(index);
-                byte g = buffer.get(index + 1);
-                byte b = buffer.get(index + 2);
-                byte[] rBytes = formatColorValue(r);
-                byte[] gBytes = formatColorValue(g);
-                byte[] bBytes = formatColorValue(b);
+                    for (int x = 0; x < width; x++) {
+                        var xBytes = formatCoordinateValue(x);
+                        messageCopy[xCoordinateOffset] = xBytes[0];
+                        messageCopy[xCoordinateOffset + 1] = xBytes[1];
+                        messageCopy[xCoordinateOffset + 2] = xBytes[2];
 
-                message[colorOffset] = rBytes[0];
-                message[colorOffset + 1] = rBytes[1];
-                message[colorOffset + 2] = gBytes[0];
-                message[colorOffset + 3] = gBytes[1];
-                message[colorOffset + 4] = bBytes[0];
-                message[colorOffset + 5] = bBytes[1];
+                        var index = (x + yOffset) * 3;
+                        byte r = image.get(index);
+                        byte g = image.get(index + 1);
+                        byte b = image.get(index + 2);
+                        byte[] rBytes = formatColorValue(r);
+                        byte[] gBytes = formatColorValue(g);
+                        byte[] bBytes = formatColorValue(b);
 
-                if (changeDetector.hasChanged(x, y, r, g, b)) {
-                    writeBuffer.put(message);
+                        messageCopy[colorOffset] = rBytes[0];
+                        messageCopy[colorOffset + 1] = rBytes[1];
+                        messageCopy[colorOffset + 2] = gBytes[0];
+                        messageCopy[colorOffset + 3] = gBytes[1];
+                        messageCopy[colorOffset + 4] = bBytes[0];
+                        messageCopy[colorOffset + 5] = bBytes[1];
+
+                        if (changeDetector.hasChanged(x, y, r, g, b)) {
+                            synchronized (writeBuffer) {
+                                writeBuffer.put(messageCopy);
+                            }
+                        }
+                    }
                 }
-            }
-        }
+                return null;
+            };
+        }).toList();
     }
 
     private static byte[] formatColorValue(byte value) {
@@ -159,13 +191,8 @@ public class Launcher {
         return coordinateTable[position];
     }
 
-    private static void printFps(long[] timesPerFrame) {
-        System.out.println(1000 / Arrays.stream(timesPerFrame).filter(t -> t > 0).average().orElse(0.0) + " fps");
-    }
-
     @FunctionalInterface
     private interface HasValueChanged {
         boolean hasChanged(int x, int y, byte r, byte g, byte b);
     }
-
 }
