@@ -49,5 +49,13 @@
       | Benchmark       | Mode | Cnt | Score  | Error   | Units |
       | --------------- | ---- | --- | ------ |---------| ----- |
       | Benchmarks.init | avgt |  25 | 14,788 | ± 0,352 |  s/op |
-    - 
+    - well... introducing local buffers *did* make the screen tearing go away, but the performance is virtually the same
+    - oh.....
+    - ![](./visualvm_6.jpg)
+    - looks like we wait half the frame time to aquire the next frame buffer...
+    - replace allocate with allocateDirect (heap vs. off heap?), but that just makes the percentage of acquire time worse...
+
+      | Benchmark       | Mode | Cnt | Score  | Error   | Units |
+      | --------------- | ---- | --- | ------ |---------| ----- |
+      | Benchmarks.init | avgt |  25 | 14,698 | ± 0,102 |  s/op |
     

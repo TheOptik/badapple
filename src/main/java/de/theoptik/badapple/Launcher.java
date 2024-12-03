@@ -2,14 +2,12 @@ package de.theoptik.badapple;
 
 import org.bytedeco.javacv.FFmpegFrameGrabber;
 
-import java.io.IOException;
 import java.net.InetSocketAddress;
+import java.net.StandardSocketOptions;
 import java.nio.ByteBuffer;
 import java.nio.channels.SelectionKey;
 import java.nio.channels.Selector;
 import java.nio.channels.SocketChannel;
-import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.*;
 import java.util.stream.IntStream;
@@ -51,15 +49,17 @@ public class Launcher {
 
     public static void streamMp4(SocketChannel socket, String filePath) throws Exception {
         var processors = Runtime.getRuntime().availableProcessors();
+        var numberOfFrameBuffers = 2;
 
-        try (var frameGrabber = new FFmpegFrameGrabber(filePath); var executor = Executors.newFixedThreadPool(processors);) {
+        try (var frameGrabber = new FFmpegFrameGrabber(filePath); var executor = Executors.newFixedThreadPool(processors)) {
             frameGrabber.start();
             var width = frameGrabber.getImageWidth();
             var height = frameGrabber.getImageHeight();
-            var batchSize = height / processors;
+            var batchSize = height/processors;
             var previousFrame = new byte[width * height * 3];
-            var writeBuffers = new ByteBuffer[]{ByteBuffer.allocate(width * height * message.length), ByteBuffer.allocate(width * height * message.length)};
-            var bufferLocks = new Semaphore[]{new Semaphore(1), new Semaphore(1)};
+            var writeBuffers = Stream.generate(() -> ByteBuffer.allocateDirect(width * height * message.length)).limit(numberOfFrameBuffers).toArray(ByteBuffer[]::new);
+            var bufferLocks = Stream.generate(() -> new Semaphore(1)).limit(numberOfFrameBuffers).toArray(Semaphore[]::new);
+            var localBuffers = Stream.generate(() -> ByteBuffer.allocateDirect(writeBuffers[0].capacity() / processors)).limit(processors).toArray(ByteBuffer[]::new);
             var bufferFiller = new Thread(() -> {
                 try {
                     var frameCounter = 0;
@@ -70,11 +70,11 @@ public class Launcher {
                         var frameBufferIndex = frameCounter % writeBuffers.length;
                         var buffer = (ByteBuffer) image.image[0];
                         bufferLocks[frameBufferIndex].acquire();
-                        List<Callable<Void>> tasks;
+                        List<Callable<ByteBuffer>> tasks;
                         if (frameCounter == 0) {
-                            tasks = writeChangedPixelsToBuffer(height, width, offsetPerLine, writeBuffers[frameBufferIndex], buffer, (x, y, r, g, b) -> true, batchSize);
+                            tasks = writeChangedPixelsToBuffer(height, width, offsetPerLine, buffer, (x, y, r, g, b) -> true, batchSize, localBuffers);
                         } else {
-                            tasks = writeChangedPixelsToBuffer(height, width, offsetPerLine, writeBuffers[frameBufferIndex], buffer, (x, y, r, g, b) -> {
+                            tasks = writeChangedPixelsToBuffer(height, width, offsetPerLine, buffer, (x, y, r, g, b) -> {
                                 var index = (x + y * width) * 3;
                                 var result = previousFrame[index] != r || previousFrame[index + 1] != g || previousFrame[index + 2] != b;
 
@@ -83,10 +83,13 @@ public class Launcher {
                                 previousFrame[index + 2] = b;
 
                                 return result;
-                            }, batchSize);
+                            }, batchSize, localBuffers);
                         }
-                        for(var future: executor.invokeAll(tasks)){
-                            future.get();
+                        for (var future : executor.invokeAll(tasks)) {
+                            var localBuffer = future.get();
+                            localBuffer.flip();
+                            writeBuffers[frameBufferIndex].put(localBuffer);
+                            localBuffer.clear();
                         }
                         bufferLocks[frameBufferIndex].release();
                         //the assignment is technically not necessary, because the FrameGrabber will overwrite the same memory address, but this way we get null as a result when the stream is over
@@ -125,20 +128,19 @@ public class Launcher {
         }
     }
 
-    private static List<Callable<Void>> writeChangedPixelsToBuffer(
+    private static List<Callable<ByteBuffer>> writeChangedPixelsToBuffer(
             int height,
             int width,
             int offsetPerLine,
-            ByteBuffer writeBuffer,
             ByteBuffer image,
             HasValueChanged changeDetector,
-            int batchSize
-    ) {
-        return IntStream.range(0,height/batchSize).<Callable<Void>>mapToObj(yChunk ->{
-                    var startY = yChunk * batchSize;
+            int batchSize,
+            ByteBuffer[] localBuffers) {
+        return IntStream.range(0, height / batchSize).<Callable<ByteBuffer>>mapToObj(yChunk -> {
+            var startY = yChunk * batchSize;
             var endY = Math.min(startY + batchSize, height);
 
-        return () -> {
+            return () -> {
                 byte[] messageCopy = new byte[message.length];
 
                 for (int y = startY; y < endY; y++) {
@@ -172,13 +174,11 @@ public class Launcher {
                         messageCopy[colorOffset + 5] = bBytes[1];
 
                         if (changeDetector.hasChanged(x, y, r, g, b)) {
-                            synchronized (writeBuffer) {
-                                writeBuffer.put(messageCopy);
-                            }
+                            localBuffers[yChunk].put(messageCopy);
                         }
                     }
                 }
-                return null;
+                return localBuffers[yChunk];
             };
         }).toList();
     }

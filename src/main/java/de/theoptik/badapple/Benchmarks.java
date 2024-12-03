@@ -9,6 +9,7 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.Socket;
+import java.net.StandardSocketOptions;
 import java.nio.channels.SelectionKey;
 import java.nio.channels.Selector;
 import java.nio.channels.SocketChannel;
@@ -23,6 +24,7 @@ public class Benchmarks {
     @BenchmarkMode(Mode.AverageTime)
     public void init() throws Exception {
         try (var socket = SocketChannel.open(); var selector = Selector.open()) {
+            socket.setOption(StandardSocketOptions.SO_SNDBUF, 1024*1024);
             socket.configureBlocking(false);
 
             socket.register(selector, SelectionKey.OP_CONNECT);
