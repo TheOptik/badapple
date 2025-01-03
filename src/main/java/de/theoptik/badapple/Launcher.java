@@ -2,6 +2,7 @@ package de.theoptik.badapple;
 
 import org.bytedeco.javacv.FFmpegFrameGrabber;
 
+import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.StandardSocketOptions;
 import java.nio.ByteBuffer;
@@ -26,28 +27,42 @@ public class Launcher {
 
     public static void main(String[] args) throws Exception {
 
-        try (var socket = SocketChannel.open(); var selector = Selector.open()) {
+        var sockets = Stream.generate(() -> {
+            try {
+                return createSocket();
+            } catch (IOException e) {
+                throw new RuntimeException(e);
+            }
+        }).limit(4).toArray(SocketChannel[]::new);
+            while(true) {
+                streamMp4(sockets, "Touhou_Bad_Apple.mp4");
+            }
+    }
+
+    public static SocketChannel createSocket() throws IOException  {
+        var socket = SocketChannel.open(); var selector = Selector.open();
             socket.configureBlocking(false);
 
             socket.register(selector, SelectionKey.OP_CONNECT);
             socket.connect(new InetSocketAddress("localhost", 1337));
-            while (true) {
+            while (!socket.isConnected()) {
                 selector.select();
                 for (var key : selector.keys()) {
                     if (key.isConnectable()) {
                         socket.finishConnect();
                         socket.register(socket.keyFor(selector).selector(), SelectionKey.OP_WRITE);
                         selector.selectedKeys().clear();
+                        selector.select();
 
-                    } else if (selector.keys().stream().anyMatch(SelectionKey::isWritable)) {
-                        streamMp4(socket, "Touhou_Bad_Apple.mp4");
+                    } if (selector.keys().stream().anyMatch(SelectionKey::isWritable)) {
+                        return socket;
                     }
                 }
             }
-        }
+            throw new IllegalStateException("Socket never became writable!");
     }
 
-    public static void streamMp4(SocketChannel socket, String filePath) throws Exception {
+    public static void streamMp4(SocketChannel[] sockets, String filePath) throws Exception {
         var processors = Runtime.getRuntime().availableProcessors();
         var numberOfFrameBuffers = 2;
 
@@ -57,9 +72,8 @@ public class Launcher {
             var height = frameGrabber.getImageHeight();
             var batchSize = height/processors;
             var previousFrame = new byte[width * height * 3];
-            var writeBuffers = Stream.generate(() -> ByteBuffer.allocateDirect(width * height * message.length)).limit(numberOfFrameBuffers).toArray(ByteBuffer[]::new);
-            var bufferLocks = Stream.generate(() -> new Semaphore(1)).limit(numberOfFrameBuffers).toArray(Semaphore[]::new);
-            var localBuffers = Stream.generate(() -> ByteBuffer.allocateDirect(writeBuffers[0].capacity() / processors)).limit(processors).toArray(ByteBuffer[]::new);
+            var writeBuffers = Stream.generate(()->Stream.generate(() -> ByteBuffer.allocateDirect((width * height * message.length) / processors)).limit(processors).toArray(ByteBuffer[]::new)).limit(numberOfFrameBuffers).toArray(ByteBuffer[][]::new);
+            var frameLocks = Stream.generate(() -> new Semaphore(1)).limit(numberOfFrameBuffers).toArray(Semaphore[]::new);
             var bufferFiller = new Thread(() -> {
                 try {
                     var frameCounter = 0;
@@ -67,12 +81,11 @@ public class Launcher {
                     var offsetPerLine = (image.imageStride / 3) - width;
 
                     while (image != null) {
-                        var frameBufferIndex = frameCounter % writeBuffers.length;
                         var buffer = (ByteBuffer) image.image[0];
-                        bufferLocks[frameBufferIndex].acquire();
+                        frameLocks[frameCounter%numberOfFrameBuffers].acquire();
                         List<Callable<ByteBuffer>> tasks;
                         if (frameCounter == 0) {
-                            tasks = writeChangedPixelsToBuffer(height, width, offsetPerLine, buffer, (x, y, r, g, b) -> true, batchSize, localBuffers);
+                            tasks = writeChangedPixelsToBuffer(height, width, offsetPerLine, buffer, (x, y, r, g, b) -> true, batchSize, writeBuffers[frameCounter%numberOfFrameBuffers]);
                         } else {
                             tasks = writeChangedPixelsToBuffer(height, width, offsetPerLine, buffer, (x, y, r, g, b) -> {
                                 var index = (x + y * width) * 3;
@@ -83,15 +96,10 @@ public class Launcher {
                                 previousFrame[index + 2] = b;
 
                                 return result;
-                            }, batchSize, localBuffers);
+                            }, batchSize, writeBuffers[frameCounter%numberOfFrameBuffers]);
                         }
-                        for (var future : executor.invokeAll(tasks)) {
-                            var localBuffer = future.get();
-                            localBuffer.flip();
-                            writeBuffers[frameBufferIndex].put(localBuffer);
-                            localBuffer.clear();
-                        }
-                        bufferLocks[frameBufferIndex].release();
+                        executor.invokeAll(tasks);
+                        frameLocks[frameCounter%numberOfFrameBuffers].release();
                         //the assignment is technically not necessary, because the FrameGrabber will overwrite the same memory address, but this way we get null as a result when the stream is over
                         image = frameGrabber.grabImage();
                         frameCounter++;
@@ -106,15 +114,21 @@ public class Launcher {
                 try {
                     var frameCounter = 0;
                     while (bufferFiller.isAlive()) {
-                        var frameBufferIndex = frameCounter % writeBuffers.length;
-                        bufferLocks[frameBufferIndex].acquire();
-                        writeBuffers[frameBufferIndex].flip();
-                        while (writeBuffers[frameBufferIndex].remaining() > 0) {
-                            socket.write(writeBuffers[frameBufferIndex]);
+                        var socketIndex = 0;
+                        frameLocks[frameCounter%numberOfFrameBuffers].acquire();
+                        for (int i = 0; i < writeBuffers[frameCounter%numberOfFrameBuffers].length; i++) {
+                            var buffer = writeBuffers[frameCounter%numberOfFrameBuffers][i];
+                            buffer.flip();
+                            while (buffer.remaining() > 0) {
+                                sockets[socketIndex].write(buffer);
+                            }
+                            socketIndex = (socketIndex+1)%sockets.length;
+                            buffer.clear();
                         }
-                        writeBuffers[frameBufferIndex].clear();
-                        bufferLocks[frameBufferIndex].release();
-                        socket.socket().getOutputStream().flush();
+                        frameLocks[frameCounter%numberOfFrameBuffers].release();
+                        for(var socket : sockets) {
+                            socket.socket().getOutputStream().flush();
+                        }
                         frameCounter++;
                     }
                 } catch (Exception e) {

@@ -82,3 +82,6 @@
         - Should i update my code to spawn multiple connection?
         - ..... changing the server would be quite fun... but maybe not in the spirit of this endeavour?
         - Decisions decisions...
+      - After a *very crude* test; results of multiple connections are a lot better but... the screen tearing.... eww, not worth it 
+        Benchmark        Mode  Cnt  Score   Error  Units
+        Benchmarks.init  avgt   25  5.578 ± 0.154   s/op

@@ -13,6 +13,9 @@ import java.net.StandardSocketOptions;
 import java.nio.channels.SelectionKey;
 import java.nio.channels.Selector;
 import java.nio.channels.SocketChannel;
+import java.util.stream.Stream;
+
+import static de.theoptik.badapple.Launcher.createSocket;
 
 public class Benchmarks {
 
@@ -23,25 +26,19 @@ public class Benchmarks {
     @Benchmark
     @BenchmarkMode(Mode.AverageTime)
     public void init() throws Exception {
-        try (var socket = SocketChannel.open(); var selector = Selector.open()) {
-            socket.setOption(StandardSocketOptions.SO_SNDBUF, 1024*1024);
-            socket.configureBlocking(false);
-
-            socket.register(selector, SelectionKey.OP_CONNECT);
-            socket.connect(new InetSocketAddress("localhost", 1337));
-            while (socket.isOpen()) {
-                selector.select();
-                for (var key : selector.keys()) {
-                    if (key.isConnectable()) {
-                        socket.finishConnect();
-                        socket.register(socket.keyFor(selector).selector(), SelectionKey.OP_WRITE);
-                        selector.selectedKeys().clear();
-
-                    } else if (selector.keys().stream().anyMatch(SelectionKey::isWritable)) {
-                        Launcher.streamMp4(socket, "Touhou_Bad_Apple.mp4");
-                        socket.close();
-                    }
-                }
+        var sockets = Stream.generate(() -> {
+            try {
+                return createSocket();
+            } catch (IOException e) {
+                throw new RuntimeException(e);
+            }
+        }).limit(4).toArray(SocketChannel[]::new);
+        Launcher.streamMp4(sockets, "Touhou_Bad_Apple.mp4");
+        for (var socket:sockets){
+            try{
+                socket.close();
+            }catch (IOException e){
+                e.printStackTrace();
             }
         }
     }
