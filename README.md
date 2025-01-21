@@ -2,7 +2,7 @@
 
 This is a pet project I started after the last Mayflower Barcamp.
 I found the project interesting and fun, so I wrote a blog post about it.
-The finished blogpost you can see here `TODO: insert link`.
+The finished blogpost you can read [here](https://blog.mayflower.de/18288-performance-tuning-pixelflut.html).
 
 ## Features
 
